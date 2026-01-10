@@ -37,7 +37,7 @@ def root_trees(t1, root1, t2, root2):
     # t1 is numbers from 1 ... n
     # t2 is numbered from n+1 to 2n
     """
-
+    
     dT = nx.DiGraph()
 
     newroot1 = 1  # left root will be 1
@@ -51,15 +51,15 @@ def root_trees(t1, root1, t2, root2):
     # add an edge from our new root to root1 and root2
     dT.add_edge(0, namemap1[root1])
     dT.add_edge(0, namemap2[root2])
-
+    
     for i, (v1, v2) in enumerate(nx.bfs_edges(t1, root1)):
         namemap1[v2] = i + namemap1[root1] + 1
         dT.add_edge(namemap1[v1], namemap1[v2])
-
+    
     for i, (v1, v2) in enumerate(nx.bfs_edges(t2, root2)):
         namemap2[v2] = i + namemap2[root2] + 1
         dT.add_edge(namemap2[v1], namemap2[v2])
-
+    
     # now we really want the inverse of namemap1 and namemap2
     # giving the old name given the new
     # since the values of namemap1 and namemap2 are unique
@@ -69,8 +69,143 @@ def root_trees(t1, root1, t2, root2):
         namemap[new] = old
     for old, new in namemap2.items():
         namemap[new] = old
-
+    
     return (dT, namemap, newroot1, newroot2)
+
+
+def _root_trees_optimized(t1, root1, t2, root2):
+    """Optimized version of root_trees using list-based adjacency structure.
+
+    Create a tree structure combining t1 and t2 with roots root1 and root2.
+    Uses list-based adjacency and computes levels during BFS for better performance.
+
+    Returns
+    -------
+    children : list of lists
+        Adjacency list representation where children[v] contains the children of node v
+    namemap : list
+        Maps new node IDs to original node names
+    levels : list
+        Distance from fake root for each node
+    newroot1 : int
+        New ID for root1
+    newroot2 : int
+        New ID for root2
+    total_nodes : int
+        Total number of nodes in the combined structure
+    """
+    n1 = nx.number_of_nodes(t1)
+    total_nodes = n1 + nx.number_of_nodes(t2) + 1  # +1 for fake root
+    
+    newroot1 = 1  # left root will be 1
+    newroot2 = n1 + 1  # right will be n+1
+    
+    # Build adjacency list representation (more efficient than DiGraph for this use)
+    # children[v] = list of children of v
+    children = [[] for _ in range(total_nodes)]
+    children[0] = [newroot1, newroot2]
+    
+    # Build inverse namemap directly: namemap[new_id] = old_name
+    # We don't need the forward map since we build inverse directly
+    namemap = [None] * total_nodes
+    namemap[newroot1] = root1
+    namemap[newroot2] = root2
+    
+    # Level/distance from fake root for each node
+    levels = [0] * total_nodes
+    levels[newroot1] = 1
+    levels[newroot2] = 1
+    
+    # Process t1: BFS and assign consecutive IDs, track levels
+    namemap1_forward = {root1: newroot1}  # temporary forward map for BFS
+    next_id = newroot1 + 1
+    for v1, v2 in nx.bfs_edges(t1, root1):
+        new_v2 = next_id
+        next_id += 1
+        namemap1_forward[v2] = new_v2
+        namemap[new_v2] = v2
+        new_v1 = namemap1_forward[v1]
+        children[new_v1].append(new_v2)
+        levels[new_v2] = levels[new_v1] + 1
+    
+    # Process t2: BFS and assign consecutive IDs, track levels
+    namemap2_forward = {root2: newroot2}  # temporary forward map for BFS
+    next_id = newroot2 + 1
+    for v1, v2 in nx.bfs_edges(t2, root2):
+        new_v2 = next_id
+        next_id += 1
+        namemap2_forward[v2] = new_v2
+        namemap[new_v2] = v2
+        new_v1 = namemap2_forward[v1]
+        children[new_v1].append(new_v2)
+        levels[new_v2] = levels[new_v1] + 1
+    
+    return (children, namemap, levels, newroot1, newroot2, total_nodes)
+
+
+def _rooted_tree_isomorphism_core(t1, root1, t2, root2):
+    """Core implementation of rooted tree isomorphism without is_tree checks.
+
+    This is called internally when we've already verified the trees are valid.
+    Uses the optimized _root_trees_optimized for better performance.
+    """
+    # get the rooted tree formed by combining them with unique names
+    # children: adjacency list, namemap: new->old mapping, levels: distance from root
+    (children, namemap, levels, newroot1, newroot2, total_nodes) = _root_trees_optimized(t1, root1, t2, root2)
+    # Group nodes by their level/distance from the root
+    # Use list of lists since levels are consecutive integers
+    h = max(levels)  # height
+    L = [[] for _ in range(h + 1)]
+    for v in range(total_nodes):
+        L[levels[v]].append(v)
+    # Use lists instead of dicts since node IDs are consecutive integers 0..total_nodes-1
+    
+    label = [0] * total_nodes
+    ordered_labels = [() for _ in range(total_nodes)]
+    ordered_children = [() for _ in range(total_nodes)]
+    # nothing to do on last level so start on h-1
+    # also nothing to do for our fake level 0, so skip that
+    
+    for i in range(h - 1, 0, -1):
+        # update the ordered_labels and ordered_children for any children
+        for v in L[i]:
+            node_children = children[v]
+            # nothing to do if no children
+            if node_children:
+                # get all the pairs of labels and nodes of children and sort by labels
+                # reverse=True to preserve DFS order, see gh-7945
+                s = sorted(((label[u], u) for u in node_children), reverse=True)
+                # invert to give a list of two tuples
+                # the sorted labels, and the corresponding children
+                ordered_labels[v], ordered_children[v] = tuple(zip(*s))
+        # now collect and sort the sorted ordered_labels
+        # for all nodes in L[i], carrying along the node
+        forlabel = sorted((ordered_labels[v], v) for v in L[i])
+        # now assign labels to these nodes, according to the sorted order
+        # starting from 0, where identical ordered_labels get the same label
+        current = 0
+        prev_ol = None
+        for ol, v in forlabel:
+            # advance to next label if different from previous
+            if prev_ol is not None and ol != prev_ol:
+                current += 1
+            label[v] = current
+            prev_ol = ol
+    # they are isomorphic if the labels of newroot1 and newroot2 are equal
+    if label[newroot1] != label[newroot2]:
+        return []
+    # now lets get the isomorphism by walking the ordered_children
+    isomorphism = []
+    stack = [(newroot1, newroot2)]
+    while stack:
+        curr_v, curr_w = stack.pop()
+        isomorphism.append((namemap[curr_v], namemap[curr_w]))
+        # Extend stack with paired children
+        oc_v = ordered_children[curr_v]
+        oc_w = ordered_children[curr_w]
+        if oc_v:  # both have same structure if isomorphic
+            stack.extend(zip(oc_v, oc_w))
+    return isomorphism
 
 
 @nx._dispatchable(graphs={"t1": 0, "t2": 2})
@@ -125,70 +260,7 @@ def rooted_tree_isomorphism(t1, root1, t2, root2):
         raise nx.NetworkXError("t1 is not a tree")
     if not nx.is_tree(t2):
         raise nx.NetworkXError("t2 is not a tree")
-
-    # get the rooted tree formed by combining them
-    # with unique names
-    (dT, namemap, newroot1, newroot2) = root_trees(t1, root1, t2, root2)
-
-    # Group nodes by their distance from the root
-    L = defaultdict(list)
-    for n, dist in nx.shortest_path_length(dT, source=0).items():
-        L[dist].append(n)
-
-    # height
-    h = max(L)
-
-    # each node has a label, initially set to 0
-    label = {v: 0 for v in dT}
-    # and also ordered_labels and ordered_children
-    # which will store ordered tuples
-    ordered_labels = {v: () for v in dT}
-    ordered_children = {v: () for v in dT}
-
-    # nothing to do on last level so start on h-1
-    # also nothing to do for our fake level 0, so skip that
-    for i in range(h - 1, 0, -1):
-        # update the ordered_labels and ordered_children
-        # for any children
-        for v in L[i]:
-            # nothing to do if no children
-            if dT.out_degree(v) > 0:
-                # get all the pairs of labels and nodes of children and sort by labels
-                # reverse=True to preserve DFS order, see gh-7945
-                s = sorted(((label[u], u) for u in dT.successors(v)), reverse=True)
-
-                # invert to give a list of two tuples
-                # the sorted labels, and the corresponding children
-                ordered_labels[v], ordered_children[v] = list(zip(*s))
-
-        # now collect and sort the sorted ordered_labels
-        # for all nodes in L[i], carrying along the node
-        forlabel = sorted((ordered_labels[v], v) for v in L[i])
-
-        # now assign labels to these nodes, according to the sorted order
-        # starting from 0, where identical ordered_labels get the same label
-        current = 0
-        for i, (ol, v) in enumerate(forlabel):
-            # advance to next label if not 0, and different from previous
-            if (i != 0) and (ol != forlabel[i - 1][0]):
-                current += 1
-            label[v] = current
-
-    # they are isomorphic if the labels of newroot1 and newroot2 are 0
-    isomorphism = []
-    if label[newroot1] == 0 and label[newroot2] == 0:
-        # now lets get the isomorphism by walking the ordered_children
-        stack = [(newroot1, newroot2)]
-        while stack:
-            curr_v, curr_w = stack.pop()
-            isomorphism.append((curr_v, curr_w))
-            stack.extend(zip(ordered_children[curr_v], ordered_children[curr_w]))
-
-        # get the mapping back in terms of the old names
-        # return in sorted order for neatness
-        isomorphism = [(namemap[u], namemap[v]) for (u, v) in isomorphism]
-
-    return isomorphism
+    return _rooted_tree_isomorphism_core(t1, root1, t2, root2)
 
 
 @not_implemented_for("directed")
@@ -234,31 +306,29 @@ def tree_isomorphism(t1, t2):
         raise nx.NetworkXError("t1 is not a tree")
     if not nx.is_tree(t2):
         raise nx.NetworkXError("t2 is not a tree")
-
+    
     # To be isomorphic, t1 and t2 must have the same number of nodes and sorted
     # degree sequences
     if not nx.faster_could_be_isomorphic(t1, t2):
         return []
-
+    
     # A tree can have either 1 or 2 centers.
     # If the number doesn't match then t1 and t2 are not isomorphic.
     center1 = nx.center(t1)
     center2 = nx.center(t2)
-
+    
     if len(center1) != len(center2):
         return []
-
+    
     # If there is only 1 center in each, then use it.
+    # Use _rooted_tree_isomorphism_core to skip redundant is_tree checks
     if len(center1) == 1:
-        return rooted_tree_isomorphism(t1, center1[0], t2, center2[0])
-
-    # If there both have 2 centers,  then try the first for t1
-    # with the first for t2.
-    attempts = rooted_tree_isomorphism(t1, center1[0], t2, center2[0])
-
+        return _rooted_tree_isomorphism_core(t1, center1[0], t2, center2[0])
+    # If they both have 2 centers, try the first for t1 with the first for t2.
+    attempts = _rooted_tree_isomorphism_core(t1, center1[0], t2, center2[0])
     # If that worked we're done.
-    if len(attempts) > 0:
+    if attempts:
         return attempts
-
+    
     # Otherwise, try center1[0] with the center2[1], and see if that works
-    return rooted_tree_isomorphism(t1, center1[0], t2, center2[1])
+    return _rooted_tree_isomorphism_core(t1, center1[0], t2, center2[1])
